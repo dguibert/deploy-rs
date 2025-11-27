@@ -72,6 +72,15 @@ impl command::HasCommandError for PathInfoError {
 }
 
 #[derive(Error, Debug)]
+pub enum EvalError {}
+
+impl command::HasCommandError for EvalError {
+    fn title() -> String {
+        "Nix eval".to_string()
+    }
+}
+
+#[derive(Error, Debug)]
 pub enum PushProfileError {
     #[error("{0}")]
     ShowDerivation(#[from] command::CommandError<ShowDerivationError>),
@@ -85,6 +94,10 @@ pub enum PushProfileError {
     PathInfo(#[from] command::CommandError<PathInfoError>),
     #[error("Copy exited with status {}", .0.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()))]
     CopyExit(Option<i32>),
+    #[error("{0}")]
+    EvalStore(#[from] command::CommandError<EvalError>),
+    #[error("Nix eval command succeeded but printed no output evaluation")]
+    EvalStdoutUtf8(std::str::Utf8Error),
     #[error("Build exited with status {}", .0.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()))]
     BuildExit(Option<i32>),
     #[error(
@@ -690,10 +703,19 @@ pub async fn build_profile(data: &PushProfileData) -> Result<String, PushProfile
 
         // Nix 2.32+ returns relative paths (without /nix/store/ prefix) in show-derivation output
         // Normalize to always use full store paths
-        let deriver = if deriver_key.starts_with("/nix/store/") {
+        let nix_store_output = Command::new("nix")
+            .arg("eval")
+            .arg("--raw")
+            .arg("--expr")
+            .arg("builtins.storeDir")
+            .output().await
+            .map_err(|e| PushProfileError::EvalStore(command::CommandError::RunError(e)))?;
+        let nix_store = std::str::from_utf8(&nix_store_output.stdout).map_err(PushProfileError::EvalStdoutUtf8)?;
+
+        let deriver = if deriver_key.starts_with(nix_store) {
             deriver_key.to_string()
         } else {
-            format!("/nix/store/{}", deriver_key)
+            format!("{}/{}", nix_store, deriver_key)
         };
 
         deriver_for_build(deriver, supports_caret).await?
